@@ -1,0 +1,507 @@
+#Anothony's R Markdown for functional genomics analysis for PROOCE MS
+---
+title: "Grimes Deep Sea Worm Metagenomes"
+author: "Anthony M. Bonacolta"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Volumes/AMB_SSD1/Keeling_Lab/collaborations/Grimes_worms/metagenomes")
+```
+- Megahit
+```{bash}
+megahit -1 SAMPLE_F.fq.gz -2 SAMPLE_R.fq.gz -o SAMPLE_MH -m 53687091200 -t 10 
+```
+- Whokaryote & eggnog-mapper (removing euk contamination)
+```{bash}
+for file in *.fasta; do
+    base=$(basename "$file" .fasta)
+    whokaryote.py --contig "$file" --outdir "${base}_whokaryote" --threads 10 --f --minsize 500
+done
+#Remove any contigs from the proteome files that are listed in eukaryote_contig_headers.txt file
+seqkit grep -v -r -f <(sed 's/$/_/' eukaryote_contig_headers.txt) contigs_proteins.faa > NAME_prok_only.faa
+for dir in *_whokaryote_real; do
+    echo "Processing $dir..."
+    cd "$dir" || continue
+    base_name="${dir%_whokaryote_real}"
+    seqkit grep -v -r -f <(sed 's/$/_/' eukaryote_contig_headers.txt) contigs_proteins.faa > "../${base_name}_prok_only.faa"
+    cd .. 
+done
+# Egg-nog Mapper the leftover sequences
+emapper.py -i SAMPLE_prok_only.faa --itype proteins --output eggnog_output --cpu 16 --data_dir /Data/databases/eggnog2 --cpu 10 --top 1
+for file in *.faa; do
+    base=$(basename "$file" .faa)
+    emapper.py -i "$file" --itype proteins --output "${base}_eggnog_output" --cpu 10 --data_dir /Data/databases/eggnog2
+done
+emapper.py -i SAMPLE_megahit_contigs_prok_only.faa --itype proteins --output golf_hadal_eggnog_output --cpu 20 --data_dir /Data/databases/eggnog2
+```
+- Compile data from all mappings
+```{r}
+library(dplyr)
+library(readr)
+library(tidyr)
+library(stringr)
+# Set directory containing EggNOG-mapper CSV files
+input_dir <- "eggnog_results/filtered/"
+# List all EggNOG CSV files
+eggnog_files <- list.files(input_dir, pattern = "_eggnog.csv$", full.names = TRUE)
+# Process each EggNOG-mapper file
+ko_list <- list()
+for (file in eggnog_files) {
+  
+  # Extract sample name from file name
+  sample_name <- str_replace(basename(file), "_eggnog.csv", "")
+
+  # Read EggNOG file
+  df <- read_csv(file, show_col_types = FALSE)
+  
+  # Select KEGG KO column, remove missing values
+  df_filtered <- df %>%
+    select(KEGG_ko) %>%
+    filter(!is.na(KEGG_ko), KEGG_ko != "-") %>%
+    mutate(Sample = sample_name)  # Add sample name
+  
+  # Split multiple KOs into separate rows
+  df_split <- df_filtered %>%
+    separate_rows(KEGG_ko, sep = ",") %>%
+    mutate(KEGG_ko = str_remove(KEGG_ko, "ko:"))  # Remove "ko:" prefix
+  
+  # Store in list
+  ko_list[[sample_name]] <- df_split
+}
+ko_data <- bind_rows(ko_list)
+# Count occurrences of each KO per sample
+ko_counts <- ko_data %>%
+  count(KEGG_ko, Sample) %>%
+  pivot_wider(names_from = Sample, values_from = n, values_fill = 0)
+# Save to CSV
+write_csv(ko_counts, "R/KO_counts_all_samples.csv")
+```
+- Kegg Heatmap
+```{r}
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(pheatmap)
+# Load KO abundance data
+df <- read_csv("R/KO_counts_all_samples.csv")
+# Convert to matrix (excluding KO column)
+ko_matrix <- as.matrix(df[,-1])  
+rownames(ko_matrix) <- df$KEGG_ko  # Set KO IDs as row names
+# Normalize by total KO count per sample (Relative Abundance)
+ko_relative <- sweep(ko_matrix, 2, colSums(ko_matrix), FUN = "/") * 100
+# Keep only the top 50 most abundant KOs
+top_50_KOs <- names(sort(rowSums(ko_relative), decreasing = TRUE))[1:50]
+ko_filtered <- ko_relative[top_50_KOs, ]
+# Log-transform for better visualization
+ko_log <- log2(ko_filtered + 1)
+# Generate heatmap
+Ko_hm <- pheatmap(ko_log, 
+         color = colorRampPalette(c("white", "blue"))(50), 
+         main = "Filtered KO Relative Abundance Heatmap",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE)
+ggsave("R/Top50_KO.svg", Ko_hm, height = 10, width = 10)
+# Save filtered KO table
+write.csv(ko_filtered, "R/KO_filtered.csv")
+```
+
+- COG Analysis
+```{r}
+library(tidyverse)
+library(pheatmap)
+input_dir <- "eggnog_results/filtered"
+files <- list.files(input_dir, pattern = "_eggnog.csv$", full.names = TRUE)
+# Define COG category descriptions
+cog_descriptions <- c(
+  A = "RNA processing and modification",
+  B = "Chromatin structure and dynamics",
+  C = "Energy production and conversion",
+  D = "Cell cycle control, cell division",
+  E = "Amino acid transport and metabolism",
+  F = "Nucleotide transport and metabolism",
+  G = "Carbohydrate transport and metabolism",
+  H = "Coenzyme transport and metabolism",
+  I = "Lipid transport and metabolism",
+  J = "Translation, ribosomal structure, biogenesis",
+  K = "Transcription",
+  L = "Replication, recombination and repair",
+  M = "Cell wall/membrane/envelope biogenesis",
+  N = "Cell motility",
+  O = "Post-translational modification, protein turnover",
+  P = "Inorganic ion transport and metabolism",
+  Q = "Secondary metabolites biosynthesis, transport",
+  R = "General function prediction only",
+  S = "Function unknown",
+  T = "Signal transduction mechanisms",
+  U = "Intracellular trafficking, secretion, vesicular transport",
+  V = "Defense mechanisms",
+  W = "Extracellular structures",
+  Y = "Nuclear structure",
+  Z = "Cytoskeleton"
+)
+# Function to extract and clean COG counts from each file
+cog_counts_list <- lapply(files, function(file) {
+  df <- read.csv(file)
+  sample_name <- gsub("_eggnog.csv", "", basename(file))
+
+  # Check column exists
+  if (!"best_OG_cat" %in% names(df)) {
+    stop(paste("Missing 'best_OG_cat' column in", file))
+  }
+
+  # Clean and split
+  df_clean <- df %>%
+    mutate(best_OG_cat = as.character(best_OG_cat)) %>%
+    filter(!is.na(best_OG_cat), best_OG_cat != "", best_OG_cat != "-") %>%
+    separate_rows(best_OG_cat, sep = "[,;/|]") %>%
+    mutate(best_OG_cat = str_trim(best_OG_cat)) %>%
+    filter(best_OG_cat %in% LETTERS)
+
+  df_counts <- df_clean %>%
+    group_by(best_OG_cat) %>%
+    summarise(Count = n(), .groups = "drop") %>%
+    mutate(Sample = sample_name)
+
+  return(df_counts)
+})
+
+# Combine and reshape
+combined_counts <- bind_rows(cog_counts_list)
+
+cog_matrix <- combined_counts %>%
+  pivot_wider(names_from = Sample, values_from = Count, values_fill = 0)
+
+# Convert to matrix
+cog_mat <- as.data.frame(cog_matrix)
+rownames(cog_mat) <- cog_mat$best_OG_cat
+cog_mat <- cog_mat[, -1]
+
+# Normalize per sample
+cog_mat_norm <- sweep(cog_mat, 2, colSums(cog_mat), FUN = "/")
+
+# Add description to rownames
+rownames(cog_mat_norm) <- paste0(
+  rownames(cog_mat_norm), " - ", cog_descriptions[rownames(cog_mat_norm)]
+)
+
+# Heatmap
+cog_hm <- pheatmap(cog_mat_norm,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         scale = "row",
+         main = "COG Functional Categories (Normalized)",
+         show_rownames = TRUE,
+         show_colnames = TRUE)
+ggsave("R/COGs.svg", cog_hm, height = 10, width = 10)
+```
+- Bar plot
+```{r}
+library(tidyverse)
+cog_colors <- c(
+  A = "#66C2A5",  # teal
+  B = "#FC8D62",  # orange
+  C = "#8DA0CB",  # blue
+  D = "#E78AC3",  # pink
+  E = "#A6D854",  # lime
+  F = "#FFD92F",  # yellow
+  G = "#E5C494",  # tan
+  H = "#B3B3B3",  # gray
+  I = "#8DD3C7",  # light teal
+  J = "#FFFFB3",  # pale yellow
+  K = "#BEBADA",  # lavender
+  L = "#FB8072",  # coral
+  M = "#80B1D3",  # sky blue
+  N = "#FDB462",  # peach
+  O = "#B3DE69",  # green
+  P = "#FCCDE5",  # pinkish
+  Q = "#D9D9D9",  # light gray
+  R = "#BC80BD",  # purple
+  S = "#CCEBC5",  # mint
+  T = "#FFED6F",  # soft yellow
+  U = "#BC80BD",  # purple
+  V = "#FFB3B3",  # light red
+  W = "#999999",  # dark gray
+  Y = "#D95F02",  # dark orange
+  Z = "#7570B3"   # dark blue
+)
+# Convert normalized matrix to long format
+cog_long <- cog_mat_norm %>%
+  as.data.frame() %>%
+  rownames_to_column("COG") %>%
+  pivot_longer(-COG, names_to = "Sample", values_to = "Relative_Abundance")
+
+# Split COG into letter and description
+cog_long <- cog_long %>%
+  separate(COG, into = c("COG_Letter", "COG_Description"), sep = " - ", remove = FALSE)
+
+cog_long <- cog_long %>%
+  mutate(COG_Label = paste0(COG_Letter, " - ", COG_Description))
+
+# Set consistent category order
+cog_order <- cog_long %>%
+  group_by(COG_Label) %>%
+  summarise(avg = mean(Relative_Abundance)) %>%
+  arrange(desc(avg)) %>%
+  pull(COG_Label)
+
+cog_long$COG_Label <- factor(cog_long$COG_Label, levels = cog_order)
+
+# Apply color palette to COG categories
+cog_long$COG_Letter <- factor(cog_long$COG_Letter, levels = names(cog_colors))
+cog_long$COG_Label <- factor(
+  cog_long$COG_Label,
+  levels = cog_long %>% arrange(COG_Letter) %>% pull(COG_Label) %>% unique()
+)
+
+# Plot stacked bar with official COG colors
+cog_bar <- ggplot(cog_long, aes(x = Sample, y = Relative_Abundance, fill = COG_Letter)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "COG Functional Category Composition per Sample",
+    x = "Sample",
+    y = "Relative Abundance",
+    fill = "COG Category"
+  ) +
+  scale_fill_manual(values = cog_colors,
+                    labels = paste0(levels(cog_long$COG_Letter), " - ", cog_descriptions[levels(cog_long$COG_Letter)])) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  )
+
+ggsave("R/COGs_barplot.svg", cog_bar, height = 10, width = 10)
+```
+- Pathway
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(pheatmap)
+
+input_dir <- "eggnog_results/filtered"
+files <- list.files(input_dir, pattern = "_eggnog.csv$", full.names = TRUE)
+
+# KEGG pathway names corresponding to their IDs
+pathway_names <- c(
+  "00010" = "Glycolysis / Gluconeogenesis",
+  "00020" = "Citrate cycle (TCA cycle)",
+  "00071" = "Fatty acid degradation",
+  "00190" = "Oxidative phosphorylation",
+  "00230" = "Purine metabolism",
+  "00240" = "Pyrimidine metabolism",
+  "00250" = "Alanine, aspartate, and glutamate metabolism",
+  "00260" = "Glycine, serine, and threonine metabolism",
+  "00270" = "Cysteine and methionine metabolism",
+  "00280" = "Valine, leucine and isoleucine degradation",
+  "00330" = "Arginine and proline metabolism",
+  "00520" = "Amino sugar and nucleotide sugar metabolism",
+  "00620" = "Pyruvate metabolism",
+  "00630" = "Glyoxylate and dicarboxylate metabolism",
+  "00640" = "Propanoate metabolism",
+  "00650" = "Butanoate metabolism",
+  "00680" = "Methane metabolism",
+  "00720" = "Phosphonate and phosphinate metabolism",
+  "00970" = "Aminoacyl-tRNA biosynthesis",
+  "01100" = "Metabolic pathways",
+  "01110" = "Biosynthesis of secondary metabolites",
+  "01120" = "Microbial metabolism in diverse environments",
+  "01130" = "Biosynthesis of antibiotics",
+  "01200" = "Carbon metabolism",
+  "01210" = "2-Oxocarboxylic acid metabolism",
+  "01212" = "Fatty acid metabolism",
+  "01230" = "Biosynthesis of cofactors",
+  "02010" = "Phosphatidylinositol signaling system",
+  "02020" = "Two-component system",
+  "02024" = "Cytokine-cytokine receptor interaction"
+)
+
+
+# Function to process each file
+ko_long_list <- lapply(files, function(file) {
+  df <- read.csv(file)
+  sample_name <- gsub("_eggnog.csv", "", basename(file))
+  
+  # Check if necessary columns exist
+  if (!"KEGG_ko" %in% names(df)) {
+    stop(paste("Missing 'KEGG_ko' column in", file))
+  }
+  if (!"KEGG_Pathway" %in% names(df)) {
+    stop(paste("Missing 'KEGG_Pathway' column in", file))
+  }
+  
+  # Clean and split KEGG_ko entries
+  df_clean <- df %>%
+    mutate(KEGG_ko = as.character(KEGG_ko)) %>%
+    filter(!is.na(KEGG_ko), KEGG_ko != "", KEGG_Pathway != "") %>%
+    separate_rows(KEGG_ko, sep = "[,;/|]") %>%
+    separate_rows(KEGG_Pathway, sep = "[,;/|]") %>%  # Split multiple pathways
+    mutate(KEGG_ko = str_trim(gsub("ko:", "", KEGG_ko)),
+           KEGG_Pathway = str_trim(gsub("map|ko", "", KEGG_Pathway))) %>%
+    filter(KEGG_ko != "")  # Remove empty KO values
+  
+  # Remove rows where the KO or Pathway is just "-" (to avoid counting empty or invalid data)
+  df_clean <- df_clean %>%
+    filter(KEGG_ko != "-" & KEGG_Pathway != "-")
+  
+  # Aggregate by KEGG_ko and KEGG_Pathway
+  df_aggregated <- df_clean %>%
+    group_by(KEGG_ko, KEGG_Pathway, Sample = sample_name) %>%
+    summarise(Abundance = n(), .groups = "drop")
+  
+  return(df_aggregated)
+})
+
+ko_long <- bind_rows(ko_long_list)
+
+# Ensure Abundance is numeric and handle non-numeric values, cleaning rows
+ko_long_clean <- ko_long %>%
+  mutate(Abundance = as.numeric(Abundance)) %>%  # Convert to numeric, NAs for non-numeric
+  filter(!is.na(Abundance), KEGG_ko != "")  # Remove rows with NA or empty KO
+
+# Aggregate data by KEGG Pathway and Sample
+pathway_abundance <- ko_long_clean %>%
+  filter(!is.na(KEGG_Pathway), KEGG_Pathway != "") %>%  # Ensure non-empty pathways
+  group_by(KEGG_Pathway, Sample) %>%
+  summarise(Abundance = sum(Abundance, na.rm = TRUE), .groups = 'drop')
+
+# Get the top 30 pathways based on total abundance across samples
+top_pathways <- pathway_abundance %>%
+  group_by(KEGG_Pathway) %>%
+  summarise(total = sum(Abundance, na.rm = TRUE)) %>%
+  top_n(30, total) %>%
+  pull(KEGG_Pathway)
+
+# Filter for top pathways
+pathway_data <- pathway_abundance %>%
+  filter(KEGG_Pathway %in% top_pathways) %>%
+  pivot_wider(names_from = Sample, values_from = Abundance, values_fill = list(Abundance = 0)) %>%
+  column_to_rownames("KEGG_Pathway") %>%
+  as.matrix()
+
+# Apply log transformation (log(x + 1) to avoid issues with zeros)
+pathway_data_log <- log1p(pathway_data)
+
+# Apply Z-Score Normalization
+pathway_data_zscore <- scale(pathway_data_log)
+
+# Replace KEGG pathway IDs with names at the end
+rownames(pathway_data_zscore) <- pathway_names[rownames(pathway_data_zscore)]
+
+kegg_hm <- pheatmap(pathway_data_zscore, cluster_rows = TRUE, cluster_cols = TRUE, 
+         main = "Top 30 Pathways Abundance (Log + Z-Score Normalized) Across Samples",
+         labels_row = rownames(pathway_data_zscore))
+
+ggsave("R/KEGG_Pathway_hm.svg", kegg_hm, height = 10, width = 10)
+```
+- Test significance with PERMANOVA:
+```{r}
+library(vegan)
+library(compositions)
+# Transpose so samples are rows (important!)
+abundance_for_clr <- t(pathway_data)
+# Add a small pseudocount to avoid issues with zeros
+abundance_for_clr <- abundance_for_clr + 1
+# Perform CLR (Centered Log Ratio) transformation
+clr_abundance <- clr(abundance_for_clr)
+aitchison_dist <- dist(clr_abundance, method = "euclidean")
+sample_metadata <- data.frame(
+  Sample = rownames(clr_abundance),
+  Species = sapply(strsplit(rownames(clr_abundance), "_"), `[`, 1),
+  Depth = sapply(strsplit(rownames(clr_abundance), "_"), `[`, 2)
+)
+permanova_results <- adonis2(
+  aitchison_dist ~ Species + Depth,
+  data = sample_metadata,
+  permutations = 9999,
+  by = "margin"  # tests each factor independently
+)
+print(permanova_results)
+```
+Permutation test for adonis under reduced model
+Marginal effects of terms
+Permutation: free
+Number of permutations: 9999
+
+adonis2(formula = aitchison_dist ~ Species + Depth, data = sample_metadata, permutations = 9999, by = "margin")
+         Df SumOfSqs      R2      F Pr(>F)   
+Species   7   3264.5 0.90874 4.8694 0.0032 **
+Depth     1     73.0 0.02032 0.7623 0.5572   
+Residual  2    191.5 0.05332                 
+Total    10   3592.4 1.00000                 
+
+```{r}
+pathway_names <- c(
+  "00010" = "Glycolysis / Gluconeogenesis",
+  "00020" = "Citrate cycle (TCA cycle)",
+  "00071" = "Fatty acid degradation",
+  "00190" = "Oxidative phosphorylation",
+  "00230" = "Purine metabolism",
+  "00240" = "Pyrimidine metabolism",
+  "00250" = "Alanine, aspartate, and glutamate metabolism",
+  "00260" = "Glycine, serine, and threonine metabolism",
+  "00270" = "Cysteine and methionine metabolism",
+  "00280" = "Valine, leucine and isoleucine degradation",
+  "00330" = "Arginine and proline metabolism",
+  "00520" = "Amino sugar and nucleotide sugar metabolism",
+  "00620" = "Pyruvate metabolism",
+  "00630" = "Glyoxylate and dicarboxylate metabolism",
+  "00640" = "Propanoate metabolism",
+  "00650" = "Butanoate metabolism",
+  "00680" = "Methane metabolism",
+  "00720" = "Phosphonate and phosphinate metabolism",
+  "00920" = "Sulfur metabolism",
+  "00970" = "Aminoacyl-tRNA biosynthesis",
+  "01100" = "Metabolic pathways",
+  "01110" = "Biosynthesis of secondary metabolites",
+  "01120" = "Microbial metabolism in diverse environments",
+  "01130" = "Biosynthesis of antibiotics",
+  "01200" = "Carbon metabolism",
+  "01210" = "2-Oxocarboxylic acid metabolism",
+  "01212" = "Fatty acid metabolism",
+  "01230" = "Biosynthesis of cofactors",
+  "02010" = "Phosphatidylinositol signaling system",
+  "02020" = "Two-component system",
+  "02024" = "Cytokine-cytokine receptor interaction",
+  "03010" = "Ribosome biogenesis in eukaryotes",
+  "03070" = "Transcription"
+)
+
+# Define symbiosis-associated pathway KEGG IDs
+symbiosis_pathways <- c(
+  "01120", "02020", "02024", "03010", "00520",
+  "00920", "00680", "01230", "00970", "01212",
+  "00260", "00190", "01110"
+)
+
+# Subset and transform the abundance matrix
+symbiosis_data <- pathway_abundance %>%
+  filter(KEGG_Pathway %in% symbiosis_pathways) %>%
+  pivot_wider(names_from = Sample, values_from = Abundance, values_fill = list(Abundance = 0)) %>%
+  column_to_rownames("KEGG_Pathway") %>%
+  as.matrix()
+
+# Log-transform and normalize
+symbiosis_data_log <- log1p(symbiosis_data)
+symbiosis_data_z <- scale(symbiosis_data_log)
+
+# Rename rows using pathway names with fallback to KEGG ID
+rownames(symbiosis_data_z) <- ifelse(
+  rownames(symbiosis_data_z) %in% names(pathway_names),
+  pathway_names[rownames(symbiosis_data_z)],
+  rownames(symbiosis_data_z)
+)
+
+symbiosis_hm <- pheatmap(symbiosis_data_z,
+                         cluster_rows = TRUE,
+                         cluster_cols = TRUE,
+                         main = "Symbiosis-Associated Pathways (Log + Z-Score Normalized)")
+
+ggsave("R/Symbiosis_Pathways_hm.svg", symbiosis_hm, height = 8, width = 10)
+
+```
+
+
