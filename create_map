@@ -1,0 +1,94 @@
+#map
+# install.packages(c("sf","ggplot2","rnaturalearth","rnaturalearthdata","ggspatial","lwgeom"))
+library(sf)
+library(ggplot2)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(ggspatial)
+library(lwgeom)
+library(devtools)
+
+sampling_sites <- data.frame(
+  name = c("Stn 2","Stn 4","Stn 5","Stn 6","Stn 7","Stn 8","Stn 9","Stn 12","Stn 13","Stn 14"),
+  lon  = c(-174.686, -170.4807, -170.16425, -169.7624, -168.822683, -166.881517, -166.7648, -162.139917, -161.959617,-161.77155), 
+  lat  = c( 54.5127,   51.708533,  51.274067,   50.655617,   51.501233,   52.345633,   52.01025,   53.569417,   53.27425,   52.7132)
+)
+
+# sampling_sites <- read.csv("sampling_sites.csv", stringsAsFactors = FALSE)
+
+pts_wgs84 <- st_as_sf(sampling_sites, coords = c("lon","lat"), crs = 4326, remove = FALSE)
+
+# World land as sf (WGS84 lon/lat)
+world <- ne_countries(scale = "large", returnclass = "sf")
+
+# Wrap across the dateline
+world_wrapped <- st_wrap_dateline(world, options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"), quiet = TRUE)
+world_shifted <- st_shift_longitude(world_wrapped)
+
+# Alaska-friendly projection
+# EPSG:3338 (Albers Equal Area for Alaska)
+target_crs <- 3338
+
+world_ak <- st_transform(world_shifted, crs = target_crs)
+pts_ak   <- st_transform(pts_wgs84,     crs = target_crs)
+
+#  Crop to Aleutians and define a bounding box 
+aleut_bbox_wgs84 <- st_as_sfc(st_bbox(c(xmin = -180, xmax = -150, ymin = 47, ymax = 57), crs = st_crs(4326)))
+aleut_bbox_ak    <- st_transform(aleut_bbox_wgs84, target_crs)
+
+# Crop the world polygons to the Aleutians extent for a tight frame
+world_ak_crop <- suppressWarnings(st_intersection(world_ak, aleut_bbox_ak))
+
+p <- ggplot() +
+  geom_sf(data = world_ak_crop, fill = "white", color = "black", linewidth = 0.2) +
+  geom_sf(data = pts_ak, shape = 21, fill = "black", color = "black", size = 2.3, stroke = 0.2) +
+  ggrepel::geom_label_repel(
+    data = cbind(pts_ak, st_coordinates(pts_ak)),
+    aes(X, Y, label = name),
+    size = 3, label.size = 0, fill = "white", segment.color = "black",
+    box.padding = 0.3, min.segment.length = 0
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.25, text_cex = 0.7, line_width = 0.2, height = unit(0.15, "cm")) +
+  annotation_north_arrow(location = "bl", which_north = "true",
+                         style = north_arrow_minimal(line_width = 0.4),
+                         pad_x = unit(0.4, "cm"), pad_y = unit(0.9, "cm")) +
+  coord_sf(expand = FALSE, clip=) +
+  theme_void(base_size = 10) +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    plot.margin = margin(5, 5, 5, 5)
+  )
+
+# Get bounding box of projected points
+bbox <- st_bbox(pts_ak)
+
+p <- ggplot() +
+  geom_sf(data = world_ak_crop, fill = "white", color = "black", linewidth = 0.2) +
+  geom_sf(data = pts_ak, shape = 21, fill = "black", color = "black", size = 2.3, stroke = 0.2) +
+  ggrepel::geom_label_repel(
+    data = cbind(pts_ak, st_coordinates(pts_ak)),
+    aes(X, Y, label = name),
+    size = 3, label.size = 0, fill = "white", segment.color = "black",
+    box.padding = 0.3, min.segment.length = 0
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.25, text_cex = 0.7, line_width = 0.2, height = unit(0.15, "cm")) +
+  annotation_north_arrow(location = "bl", which_north = "true",
+                         style = north_arrow_minimal(line_width = 0.4),
+                         pad_x = unit(0.4, "cm"), pad_y = unit(0.9, "cm")) +
+  coord_sf(
+    xlim = c(bbox$xmin - 150000, bbox$xmax + 150000),   # keep longitude window tight
+    ylim = c(bbox$ymin - 150000, bbox$ymax + 150000),   # expand latitude window more
+    expand = FALSE
+  ) +
+  theme_void(base_size = 10) +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    plot.margin = margin(5, 5, 5, 5)
+  )
+
+p
+
+
+# save
+ggsave("aleutians_sampling_map_bw.png", p, width = 7, height = 4, dpi = 600, bg = "white")
+ggsave("aleutians_sampling_map_bw.pdf", p, width = 7, height = 4, device = cairo_pdf, bg = "white")
