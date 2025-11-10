@@ -162,13 +162,59 @@ cm50   <- community_data[rowSums(community_data) >= 50000, , drop=FALSE]
 al50   <- align_cm_meta(cm50, metadata)
 hel50  <- decostand(al50$cm, method="hellinger")
 
-perma_block(hel_full, am_full$meta)  
-perma_block(hel20,   am20$meta)
-perma_block(hel50,   am50$meta)
+perm_test <- function(Xhel, meta, dist = "bray") {
+  # Ensure factors are clean and aligned
+  meta <- meta %>%
+    mutate(
+      Sample       = as.character(Sample),
+      FeedingGuild = droplevels(factor(FeedingGuild)),
+      Depth        = droplevels(factor(Depth)),
+      Family       = droplevels(factor(Family))
+    )
+  
+  # Match rows between Xhel and metadata
+  common_ids <- intersect(rownames(Xhel), meta$Sample)
+  Xhel <- Xhel[common_ids, , drop = FALSE]
+  meta <- meta[match(common_ids, meta$Sample), , drop = FALSE]
+  
+  # Distance matrix (assumes Xhel already Hellinger-transformed)
+  d <- vegdist(Xhel, method = dist)
+  
+  out <- list()
 
-disp_tbl <- rbind(
-  cbind(tier="8704", res_full$dispersion),
-  cbind(tier="20k",  res_20k$dispersion),
-  cbind(tier="50k",  res_50k$dispersion)
-)
-disp_tbl
+  ## ---------- Model 1: FeedingGuild + Depth ----------
+  mod1 <- adonis2(d ~ FeedingGuild + Depth, data = meta,
+                  permutations = 9999, by = "margin")
+  disp1 <- data.frame(
+    model = "FeedingGuild+Depth",
+    factor = c("FeedingGuild", "Depth"),
+    p = c(
+      permutest(betadisper(d, meta$FeedingGuild), permutations = 9999)$tab[1, "Pr(>F)"],
+      permutest(betadisper(d, meta$Depth), permutations = 9999)$tab[1, "Pr(>F)"]
+    )
+  )
+  
+  ## ---------- Model 2: Family + Depth ----------
+  mod2 <- adonis2(d ~ Family + Depth, data = meta,
+                  permutations = 9999, by = "margin")
+  disp2 <- data.frame(
+    model = "Family+Depth",
+    factor = c("Family", "Depth"),
+    p = c(
+      permutest(betadisper(d, meta$Family), permutations = 9999)$tab[1, "Pr(>F)"],
+      permutest(betadisper(d, meta$Depth), permutations = 9999)$tab[1, "Pr(>F)"]
+    )
+  )
+
+  out$FeedingGuild_model <- mod1
+  out$FeedingGuild_disp  <- disp1
+  out$Family_model       <- mod2
+  out$Family_disp        <- disp2
+  
+  return(out)
+}
+
+perma_test(hel_full, am_full$meta)  
+perma_test(hel20,   am20$meta)
+perma_test(hel50,   am50$meta)
+
