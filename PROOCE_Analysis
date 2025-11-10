@@ -1,0 +1,174 @@
+# Load required packages
+library(vegan)
+library(psych)
+library(car)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+
+#################
+# Load data
+#################
+community_data <- read.csv("~/community_data.csv", row.names = 1)  # Abundance matrix
+metadata <- read.csv("~/metadata.csv")  # Metadata file
+env_data <- read.csv("~/env.csv")  # Environmental data
+
+# Data Preparation: Ensure column types are appropriate
+str(env_data)
+str(community_data)
+str(metadata)
+
+# Rarefaction or exclude low-depth samples
+# Rarefy community data to the smallest sample size
+anyNA(community_data)  # Check for missing values
+community_data <- as.data.frame(lapply(community_data, as.numeric))
+min_sample_size <- min(rowSums(community_data))
+rarefied_community <- rrarefy(community_data, sample = min_sample_size) #rarefy to lowest sample size which is 8407
+
+#cutting off samples less than 20k 
+cutoff1 <- 20000
+keep1 <- rowSums(community_data) >= cutoff1
+community_data_filt_20k <- community_data[keep1, ]   # exclude low-depth samples
+community_data_scaled <- decostand(community_data_filt_20k, method = "hellinger")
+
+#Same for 50k
+cutoff2 <- 50000
+keep2 <- rowSums(community_data) >= cutoff2
+community_data_filt_50k <- community_data[keep2, ]   # exclude low-depth samples
+community_data_scaled50 <- decostand(community_data_filt_50k, method = "hellinger")
+
+# PCA on Environmental Data: Remove non-numeric columns and constant columns from env_data
+
+env_pca <- prcomp(env_data, scale. = TRUE)
+
+# Plot PCA
+pca_data <- as.data.frame(env_pca$x)
+pca_data$Station <- env_data$Station
+ggplot(pca_data, aes(x = PC1, y = PC2, label = Station)) +
+  geom_point(size = 3, color = "blue") +
+  geom_text(vjust = 1.5, hjust = 0.5) +
+  ggtitle("PCA of Environmental Data") +
+  xlab(paste("PC1 (", round(env_pca$sdev[1]^2 / sum(env_pca$sdev^2) * 100, 2), "%)", sep = "")) +
+  ylab(paste("PC2 (", round(env_pca$sdev[2]^2 / sum(env_pca$sdev^2) * 100, 2), "%)", sep = ""))
+
+# PCoA on Community Data
+# Calculate Bray-Curtis distance
+community_dist <- vegdist(rarefied_community, method = "bray")
+#community_dist <- vegdist(community_data_scaled, method = "bray")
+# Perform PCoA
+pcoa_result <- cmdscale(community_dist, k = 2, eig = TRUE)
+summary(pcoa_result)
+pcoa_data <- as.data.frame(pcoa_result$points)
+colnames(pcoa_data) <- c("PCoA1", "PCoA2")
+pcoa_data$Depth <- metadata$Depth
+pcoa_data$Family <- metadata$Family
+pcoa_data$FeedingGuild <- metadata$FeedingGuild
+pcoa_data$Station <- as.factor(metadata$Station)
+pcoa_result
+
+# Plot PCoA
+ggplot(pcoa_data, aes(x = PCoA1, y = PCoA2, color = Family, shape=Depth)) +
+  geom_point(size = 5) + theme_classic()+ scale_colour_manual(values=cbbPalette)+
+  ggtitle("PCoA of Community Data (Bray-Curtis)") +
+  xlab(paste("PCoA1 (", round(pcoa_result$eig[1] / sum(pcoa_result$eig) * 100, 2), "%)", sep = "")) +
+  ylab(paste("PCoA2 (", round(pcoa_result$eig[2] / sum(pcoa_result$eig) * 100, 2), "%)", sep = "")) 
+
+#Remove the missing two 
+shared_samples <- intersect(rownames(community_data), metadata$Sample)
+shared_samples
+community_data_filt <- community_data[shared_samples, ]
+metadata_filt <- metadata %>% filter(Sample %in% shared_samples)
+metadata_filt20<-read.csv("~/metadata_combined_filtered.csv")
+metadata_filt50<-read.csv("~/metadata_combined_filtered_50.csv")
+
+# db-RDA Analysis
+
+community_data0 <- community_data[rownames(community_data) %in% env_data$Station, ]
+community_data_scaled <- decostand(community_data0, method = "hellinger")
+rda_result <- dbrda(community_data_scaled ~ Temperature + Salinity + CurrentVelocity + Nitrate + Phosphate + Silicate + Oxygen + Iron + PrimaryProductivity +
+                      Chlorophyll + TOC + Grain.Size, data = env_data)
+summary(rda_result)
+adonis2(community_data_scaled ~ Temperature + Salinity + CurrentVelocity + Nitrate +
+          Phosphate + Silicate + Oxygen + Iron + PrimaryProductivity +
+          Chlorophyll + TOC + Grain.Size, data = env_data)
+anova(rda_result)
+
+#20k
+community_data1 <- community_data_filt_20k[rownames(community_data_filt_20k) %in% env_data$Station, ]
+env_data1 <- env_data[env_data$Station %in% rownames(community_data_filt_20k), ]
+#env_data2 <- env_data[match(rownames(community_data), env_data$Station), ]
+community_data_scaled1 <- decostand(community_data1, method = "hellinger")
+rda_result1 <- dbrda(community_data_scaled1 ~ Temperature + Salinity + CurrentVelocity + Nitrate + Phosphate + Silicate + Oxygen + Iron + PrimaryProductivity +
+                      Chlorophyll + TOC + Grain.Size, data = env_data1)
+summary(rda_result1)
+adonis2(community_data_scaled1 ~ Temperature + Salinity + CurrentVelocity + Nitrate +
+          Phosphate + Silicate + Oxygen + Iron + PrimaryProductivity +
+          Chlorophyll + TOC + Grain.Size, data = env_data1)
+anova(rda_result1)
+
+#50k
+community_data2 <- community_data_filt_50k[rownames(community_data_filt_50k) %in% env_data$Station, ]
+env_data2 <- env_data[env_data$Station %in% rownames(community_data_filt_50k), ]
+#env_data2 <- env_data[match(rownames(community_data), env_data$Station), ]
+community_data_scaled2 <- decostand(community_data2, method = "hellinger")
+#str(env_data2)
+
+rda_result2 <- dbrda(community_data_scaled2 ~ Temperature + Salinity + CurrentVelocity + Nitrate + Phosphate + Silicate + Oxygen + Iron + PrimaryProductivity +
+                    Chlorophyll + TOC + Grain.Size, data = env_data2)
+summary(rda_result2)
+adonis2(community_data_scaled2 ~ Temperature + Salinity + CurrentVelocity + Nitrate +
+          Phosphate + Silicate + Oxygen + Iron + PrimaryProductivity +
+          Chlorophyll + TOC + Grain.Size, data = env_data2)
+anova(rda_result2)
+
+#PLOT RDA
+plot(rda_result, scaling = 2, main = "dbRDA: Community Data and Environmental Variables")
+plot(rda_result, scaling = 2, main = "dbRDA Plot",
+     display = c("sites", "species"),  # Include only sites and species
+     pch = c(19, 4),                  # Change symbols for samples and species
+     col = c("black", "blue"))  
+
+##########################
+# Beta Diversity and Hierarchical Clustering
+##########################
+# Calculate pairwise dissimilarities and perform clustering
+hc <- hclust(community_dist, method = "average")
+plot(hc, main = "Hierarchical Clustering (Bray-Curtis)", xlab = "")
+
+###############################
+#Running the samples
+##############################
+community_data_names <- community_data
+
+min_depth <- min(rowSums(community_data_names))
+cm_full   <- rrarefy(community_data_names, sample=min_depth)
+am_full   <- align_cm_meta(cm_full,  metadata)
+hel_full  <- decostand(am_full$cm, method="hellinger")
+
+lapply(am_full$meta[c("FeedingGuild","Depth","Family")],
+       function(x) table(x, useNA="ifany"))
+
+cm_full   <- rrarefy(community_data, sample=min_depth)
+al_full   <- align_cm_meta(cm_full, metadata)
+hel_full  <- decostand(al_full$cm, method="hellinger")
+
+# 20k
+cm20   <- community_data[rowSums(community_data) >= 20000, , drop=FALSE]
+al20   <- align_cm_meta(cm20, metadata)
+hel20  <- decostand(al20$cm, method="hellinger")
+
+# 50k
+cm50   <- community_data[rowSums(community_data) >= 50000, , drop=FALSE]
+al50   <- align_cm_meta(cm50, metadata)
+hel50  <- decostand(al50$cm, method="hellinger")
+
+perma_block(hel_full, am_full$meta)  
+perma_block(hel20,   am20$meta)
+perma_block(hel50,   am50$meta)
+
+disp_tbl <- rbind(
+  cbind(tier="8704", res_full$dispersion),
+  cbind(tier="20k",  res_20k$dispersion),
+  cbind(tier="50k",  res_50k$dispersion)
+)
+disp_tbl
